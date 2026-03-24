@@ -3,7 +3,7 @@ import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import { basename, dirname, join } from "node:path";
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
@@ -287,19 +287,39 @@ async function runSubagent(
       `Example: "[${agentType}] Analyzing auth module". Keep it concise.`;
     const identity = agentDefs?.body ?? params.systemPrompt ?? null;
     const roleBlock = identity ? `\n\n${identity}` : "";
-    const forkPreamble =
-      "[Session forked for focused work. Continue naturally from the conversation above. " +
-      "Do NOT restart or re-execute anything already done.]\n\n";
     const fullTask = params.fork
-      ? `${forkPreamble}${params.task}`
+      ? params.task
       : `${roleBlock}\n\n${modeHint}\n\n${tabTitleInstruction}\n\n${params.task}\n\n${summaryInstruction}`;
 
     // Build pi command
     const parts: string[] = ["pi"];
     parts.push("--session-dir", shellEscape(dirname(sessionFile)));
 
+    // For fork mode, create a clean copy of the session that excludes
+    // the "Use subagent..." meta-message and tool call that triggered this.
+    // The forked session sees only the original conversation + the user's actual task.
+    let forkCleanupFile: string | null = null;
     if (params.fork) {
-      parts.push("--fork", shellEscape(sessionFile));
+      const raw = readFileSync(sessionFile, "utf8");
+      const lines = raw.split("\n").filter((l) => l.trim());
+
+      // Walk backwards to find the last user message (the meta-instruction)
+      // and truncate everything from there onwards
+      let truncateAt = lines.length;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const entry = JSON.parse(lines[i]);
+          if (entry.type === "message" && entry.message?.role === "user") {
+            truncateAt = i;
+            break;
+          }
+        } catch {}
+      }
+
+      const cleanLines = lines.slice(0, truncateAt);
+      forkCleanupFile = join(tmpdir(), `pi-fork-clean-${Date.now()}.jsonl`);
+      writeFileSync(forkCleanupFile, cleanLines.join("\n") + "\n", "utf8");
+      parts.push("--fork", shellEscape(forkCleanupFile));
     }
 
     const subagentDonePath = join(dirname(new URL(import.meta.url).pathname), "subagent-done.ts");
@@ -337,17 +357,23 @@ async function runSubagent(
     }
     const envPrefix = envParts.join(" ") + " ";
 
-    // Write task to an artifact file and pass via @file.
-    // pi combines @file text and CLI messages into a single initial user message,
-    // so the agent receives this as a normal user prompt (not a file attachment).
-    const sessionId = ctx.sessionManager.getSessionId();
-    const artifactDir = getArtifactDir(ctx.cwd, sessionId);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const artifactName = `context/${params.name.toLowerCase().replace(/\s+/g, "-")}-${timestamp}.md`;
-    const artifactPath = join(artifactDir, artifactName);
-    mkdirSync(dirname(artifactPath), { recursive: true });
-    writeFileSync(artifactPath, fullTask, "utf8");
-    parts.push(`@${artifactPath}`);
+    // Pass task to the sub-agent.
+    // For fork mode, pass as a plain quoted argument — the forked session already
+    // has the full conversation context, so the message arrives as if the user typed it.
+    // For non-fork mode, write to an artifact file and pass via @file to handle
+    // long task descriptions with role/instructions safely.
+    if (params.fork) {
+      parts.push(shellEscape(fullTask));
+    } else {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const artifactDir = getArtifactDir(ctx.cwd, sessionId);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const artifactName = `context/${params.name.toLowerCase().replace(/\s+/g, "-")}-${timestamp}.md`;
+      const artifactPath = join(artifactDir, artifactName);
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, fullTask, "utf8");
+      parts.push(`@${artifactPath}`);
+    }
 
     // Resolve cwd — param overrides agent default, supports absolute and relative paths
     const rawCwd = params.cwd ?? agentDefs?.cwd ?? null;
@@ -420,6 +446,11 @@ async function runSubagent(
     closeSurface(surface);
     surface = null;
 
+    // Clean up temp fork file
+    if (forkCleanupFile) {
+      try { unlinkSync(forkCleanupFile); } catch {}
+    }
+
     return {
       name: params.name,
       task: params.task,
@@ -430,6 +461,9 @@ async function runSubagent(
       elapsed,
     };
   } catch (err: any) {
+    if (forkCleanupFile) {
+      try { unlinkSync(forkCleanupFile); } catch {}
+    }
     if (surface) {
       try { closeSurface(surface); } catch {}
       surface = null;
