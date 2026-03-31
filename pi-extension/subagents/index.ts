@@ -1094,7 +1094,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           parts.push(`@${msgFile}`);
         }
 
-        const command = `${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; echo '__SUBAGENT_DONE_'${exitStatusVar()}'__'`;
+        // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
+        const resumeEnvParts: string[] = [];
+        if (process.env.PI_CODING_AGENT_DIR) {
+          resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
+        }
+        const resumeEnvPrefix = resumeEnvParts.length > 0 ? resumeEnvParts.join(" ") + " " : "";
+
+        const command = `${resumeEnvPrefix}${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; echo '__SUBAGENT_DONE_'${exitStatusVar()}'__'`;
         sendCommand(surface, command);
 
         // Register as a running subagent for widget tracking
