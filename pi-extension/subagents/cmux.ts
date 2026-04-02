@@ -173,12 +173,68 @@ async function zellijActionAsync(args: string[], surface?: string): Promise<stri
   return stdout;
 }
 
+/** Tracked subagent pane for cmux — reused across subagent launches. */
+let cmuxSubagentPane: string | null = null;
+
 /**
- * Create a new terminal pane as a right split and set its title.
+ * Create a new terminal surface for a subagent.
+ *
+ * For cmux: the first call creates a right-split pane; subsequent calls add
+ * tabs to that same pane (avoiding ever-narrower splits).
+ * For tmux/zellij/wezterm: falls back to split behavior.
+ *
  * Returns an identifier (`surface:42` in cmux, `%12` in tmux, `pane:7` in zellij, `42` in wezterm).
  */
 export function createSurface(name: string): string {
-  return createSurfaceSplit(name, "right");
+  const backend = getMuxBackend();
+
+  if (backend === "cmux" && cmuxSubagentPane) {
+    // Verify the pane still exists before adding a tab to it
+    try {
+      const tree = execSync(`cmux tree`, { encoding: "utf8" });
+      if (tree.includes(cmuxSubagentPane)) {
+        return createSurfaceInPane(name, cmuxSubagentPane);
+      }
+    } catch {}
+    // Pane is gone — fall through to create a new split
+    cmuxSubagentPane = null;
+  }
+
+  const surface = createSurfaceSplit(name, "right");
+
+  // For cmux, remember the pane so future subagents become tabs in it
+  if (backend === "cmux") {
+    try {
+      const info = execSync(`cmux identify --surface ${shellEscape(surface)}`, {
+        encoding: "utf8",
+      });
+      const parsed = JSON.parse(info);
+      const paneRef = parsed?.caller?.pane_ref;
+      if (paneRef) {
+        cmuxSubagentPane = paneRef;
+      }
+    } catch {}
+  }
+
+  return surface;
+}
+
+/**
+ * Create a new surface (tab) in an existing cmux pane.
+ */
+function createSurfaceInPane(name: string, pane: string): string {
+  const out = execSync(`cmux new-surface --pane ${shellEscape(pane)}`, {
+    encoding: "utf8",
+  }).trim();
+  const match = out.match(/surface:\d+/);
+  if (!match) {
+    throw new Error(`Unexpected cmux new-surface output: ${out}`);
+  }
+  const surface = match[0];
+  execSync(`cmux rename-tab --surface ${shellEscape(surface)} ${shellEscape(name)}`, {
+    encoding: "utf8",
+  });
+  return surface;
 }
 
 /**
@@ -328,6 +384,9 @@ export function renameCurrentTab(title: string): void {
   }
 
   if (backend === "tmux") {
+    if (process.env.PI_SUBAGENT_RENAME_TMUX_WINDOW !== "1") {
+      return;
+    }
     const paneId = process.env.TMUX_PANE;
     if (!paneId) throw new Error("TMUX_PANE not set");
     const windowId = execFileSync("tmux", ["display-message", "-p", "-t", paneId, "#{window_id}"], {

@@ -1,17 +1,17 @@
 ---
 name: plan
 description: >
-  Planning workflow. Spawns an interactive planner sub-agent
-  in a multiplexer pane with shared session context. Use when asked to "plan",
-  "brainstorm", "I want to build X", or "let's design". Requires the
-  subagents extension and a supported multiplexer (cmux/tmux/zellij).
+  Planning workflow. Spawns a spec agent to clarify WHAT to build, then a
+  planner agent to figure out HOW. Use when asked to "plan", "brainstorm",
+  "I want to build X", or "let's design". Requires the subagents extension
+  and a supported multiplexer (cmux/tmux/zellij).
 ---
 
 # Plan
 
-A planning workflow that offloads brainstorming and plan creation to a dedicated interactive subagent, keeping the main session clean for orchestration.
+A planning workflow that separates WHAT (spec) from HOW (plan). First a spec agent clarifies intent and requirements with the user, then a planner figures out the technical approach and creates todos.
 
-**Announce at start:** "Let me investigate first, then I'll open a dedicated planning session where we can work through this together."
+**Announce at start:** "Let me investigate first, then I'll open a spec session to nail down exactly what we're building."
 
 ---
 
@@ -22,6 +22,7 @@ Use `set_tab_title` to keep the user informed of progress in the multiplexer UI.
 | Phase         | Title example                                                  |
 | ------------- | -------------------------------------------------------------- |
 | Investigation | `🔍 Investigating: <short task>`                               |
+| Spec          | `📝 Spec: <short task>`                                        |
 | Planning      | `💬 Planning: <short task>`                                    |
 | Review plan   | `📋 Review: <short task>`                                      |
 | Executing     | `🔨 Executing: 1/3 — <short task>` (update counter per worker) |
@@ -31,9 +32,10 @@ Use `set_tab_title` to keep the user informed of progress in the multiplexer UI.
 Name subagents with context too:
 
 - Scout: `"🔍 Scout"` (default is fine)
+- Spec: `"📝 Spec"`
+- Planner: `"💬 Planner"`
 - Workers: `"🔨 Worker 1/3"`, `"🔨 Worker 2/3"`, etc.
 - Reviewer: `"🔎 Reviewer"`
-- Planner: `"💬 Planner"`
 
 ---
 
@@ -42,13 +44,15 @@ Name subagents with context too:
 ```
 Phase 1: Quick Investigation (main session)
     ↓
-Phase 2: Spawn Planner Subagent (interactive — user collaborates here)
+Phase 2: Spawn Spec Agent (interactive — clarifies WHAT to build)
     ↓
-Phase 3: Review Plan & Todos (main session)
+Phase 3: Spawn Planner Agent (interactive — figures out HOW to build it)
     ↓
-Phase 4: Execute Todos (workers)
+Phase 4: Review Plan & Todos (main session)
     ↓
-Phase 5: Review
+Phase 5: Execute Todos (workers)
+    ↓
+Phase 6: Review
 ```
 
 ---
@@ -80,29 +84,54 @@ Read the scout's summary from the subagent result before proceeding.
 
 ---
 
-## Phase 2: Spawn Planner Subagent
+## Phase 2: Spawn Spec Agent
 
-Spawn the interactive planner. The `planner` agent definition has the full brainstorming workflow built in — clarify, explore, validate design, write plan, create todos.
+Spawn the interactive spec agent. The `spec` agent clarifies intent, requirements, effort level, and success criteria (ISC) with the user.
 
 ```typescript
 subagent({
-  name: "Planner",
-  agent: "planner",
+  name: "📝 Spec",
+  agent: "spec",
   interactive: true,
-  task: `Plan: [what the user wants to build]
+  task: `Define spec: [what the user wants to build]
 
 Context from investigation:
 [paste relevant findings from Phase 1 here]`,
 });
 ```
 
-**The user works with the planner in the subagent.** The main session waits. When the user is done, they press Ctrl+D and the subagent.s summary is returned to the main session.
+**The user works with the spec agent.** When done, they press Ctrl+D and the spec artifact path is returned.
 
 ---
 
-## Phase 3: Review Plan & Todos
+## Phase 3: Spawn Planner Agent
 
-Once the subagent closes, read the plan and todos:
+Read the spec artifact, then spawn the planner. The planner takes the spec as input and figures out the technical approach — explores options, validates design, runs a premortem, writes the plan, and creates todos with mandatory code examples/references.
+
+```typescript
+// Read the spec first
+read_artifact({ name: "specs/YYYY-MM-DD-<name>.md" });
+
+subagent({
+  name: "💬 Planner",
+  agent: "planner",
+  interactive: true,
+  task: `Plan implementation for spec: specs/YYYY-MM-DD-<name>.md
+
+Context from investigation:
+[paste relevant findings]`,
+});
+```
+
+**The user works with the planner.** The planner will NOT re-clarify requirements — that's already done in the spec. It focuses on technical approach, design validation, premortem risk analysis, and creating well-scoped todos.
+
+When done, the user presses Ctrl+D and the plan + todos are returned.
+
+---
+
+## Phase 4: Review Plan & Todos
+
+Once the planner closes, read the plan and todos:
 
 ```typescript
 todo({ action: "list" });
@@ -114,7 +143,7 @@ Review with the user:
 
 ---
 
-## Phase 4: Execute Todos
+## Phase 5: Execute Todos
 
 Spawn a scout first for context, then workers sequentially:
 
@@ -148,7 +177,7 @@ subagent({
 
 ---
 
-## Phase 5: Review
+## Phase 6: Review
 
 After all todos are complete:
 
