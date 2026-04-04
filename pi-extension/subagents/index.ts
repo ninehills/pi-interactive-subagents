@@ -10,9 +10,9 @@ import {
   writeFileSync,
   existsSync,
   mkdirSync,
-  unlinkSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import {
   isMuxAvailable,
   muxSetupHint,
@@ -227,7 +227,6 @@ interface RunningSubagent {
   sessionFile: string;
   entries?: number;
   bytes?: number;
-  forkCleanupFile?: string;
   abortController?: AbortController;
 }
 
@@ -446,10 +445,9 @@ async function launchSubagent(
   const parts: string[] = ["pi"];
   parts.push("--session", shellEscape(subagentSessionFile));
 
-  // For fork mode, create a clean copy of the session that excludes
-  // the "Use subagent..." meta-message and tool call that triggered this.
-  // The forked session sees only the original conversation + the user's actual task.
-  let forkCleanupFile: string | undefined;
+  // For fork mode, build the forked session file directly at subagentSessionFile.
+  // We write a new session header + cleaned entries (excluding the meta-message
+  // that triggered this fork). The sub-agent launches with just --session.
   if (params.fork) {
     const raw = readFileSync(sessionFile, "utf8");
     const lines = raw.split("\n").filter((l) => l.trim());
@@ -467,10 +465,31 @@ async function launchSubagent(
       } catch {}
     }
 
+    // Separate header from content entries
     const cleanLines = lines.slice(0, truncateAt);
-    forkCleanupFile = join(tmpdir(), `pi-fork-clean-${Date.now()}.jsonl`);
-    writeFileSync(forkCleanupFile, cleanLines.join("\n") + "\n", "utf8");
-    parts.push("--fork", shellEscape(forkCleanupFile));
+    const contentLines = cleanLines.filter((l) => {
+      try {
+        return JSON.parse(l).type !== "session";
+      } catch {
+        return true;
+      }
+    });
+
+    // Write new session header + cleaned entries to the subagent session file
+    const newHeader = JSON.stringify({
+      type: "session",
+      version: 3,
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      cwd: process.cwd(),
+      parentSession: sessionFile,
+    });
+    mkdirSync(dirname(subagentSessionFile), { recursive: true });
+    writeFileSync(
+      subagentSessionFile,
+      newHeader + "\n" + contentLines.join("\n") + "\n",
+      "utf8",
+    );
   }
 
   const subagentDonePath = join(dirname(new URL(import.meta.url).pathname), "subagent-done.ts");
@@ -577,7 +596,6 @@ async function launchSubagent(
     surface,
     startTime,
     sessionFile: subagentSessionFile,
-    forkCleanupFile,
   };
 
   runningSubagents.set(id, running);
@@ -586,14 +604,14 @@ async function launchSubagent(
 
 /**
  * Watch a launched subagent until it exits. Polls for completion, extracts
- * the summary from the session file, cleans up the surface and fork file,
+ * the summary from the session file, cleans up the surface,
  * and removes the entry from runningSubagents.
  */
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
 ): Promise<SubagentResult> {
-  const { name, task, surface, startTime, sessionFile, forkCleanupFile } = running;
+  const { name, task, surface, startTime, sessionFile } = running;
 
   try {
     const exitCode = await pollForExit(surface, signal, {
@@ -632,20 +650,8 @@ async function watchSubagent(
     closeSurface(surface);
     runningSubagents.delete(running.id);
 
-    // Clean up temp fork file
-    if (forkCleanupFile) {
-      try {
-        unlinkSync(forkCleanupFile);
-      } catch {}
-    }
-
     return { name, task, summary, sessionFile, exitCode, elapsed };
   } catch (err: any) {
-    if (forkCleanupFile) {
-      try {
-        unlinkSync(forkCleanupFile);
-      } catch {}
-    }
     try {
       closeSurface(surface);
     } catch {}
