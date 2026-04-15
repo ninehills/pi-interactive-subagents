@@ -246,6 +246,7 @@ interface SubagentResult {
   task: string;
   summary: string;
   sessionFile?: string;
+  claudeSessionId?: string;  // For Claude Code resume capability
   exitCode: number;
   elapsed: number;
   error?: string;
@@ -814,8 +815,9 @@ async function watchSubagent(
       }
 
       // Copy Claude session transcript
+      let sessionId: string | null = null;
       if (running.sentinelFile) {
-        copyClaudeSession(running.sentinelFile);
+        sessionId = copyClaudeSession(running.sentinelFile);
         try { unlinkSync(running.sentinelFile); } catch {}
         try { unlinkSync(running.sentinelFile + ".transcript"); } catch {}
       }
@@ -823,7 +825,7 @@ async function watchSubagent(
       closeSurface(surface);
       runningSubagents.delete(running.id);
 
-      return { name, task, summary, exitCode: result.exitCode, elapsed };
+      return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
     }
 
     // Pi subagent result extraction (existing, unchanged)
@@ -1008,6 +1010,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
                   sessionFile: result.sessionFile,
+                  ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
                 },
               },
               { triggerTurn: true, deliverAs: "steer" },
