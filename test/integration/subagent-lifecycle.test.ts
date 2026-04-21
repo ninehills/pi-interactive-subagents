@@ -109,6 +109,49 @@ for (const backend of backends) {
       }
     });
 
+    // ── In-progress stalled status ──
+
+    it("surfaces a compact stalled status before final completion", async () => {
+      const id = uniqueId();
+      const markerFile = `/tmp/pi-integ-status-${id}.txt`;
+      trackTempFile(env, markerFile);
+
+      const surface = createTrackedSurface(env, `status-${id}`);
+      await sleep(1000);
+
+      const task = [
+        `Call the subagent tool with these EXACT parameters:`,
+        `  name: "Status-${id}"`,
+        `  agent: "test-echo"`,
+        `  statusCadenceSeconds: 10`,
+        `  task: "Run this bash command: sleep 55; echo 'STATUS_${id}' > '${markerFile}'"`,
+        `Do not do anything else. Just call the subagent tool once.`,
+        `After you receive the subagent result, say STATUS_TEST_DONE.`,
+      ].join("\n");
+
+      startPi(surface, env.dir, task);
+
+      const stalledScreen = await waitForScreen(
+        surface,
+        /Subagent status[\s\S]*stalled|stalled[\s\S]*Subagent status/i,
+        PI_TIMEOUT,
+        300,
+      );
+      assert.match(stalledScreen, /Subagent status/i);
+      assert.match(stalledScreen, /stalled/i);
+
+      const content = await waitForFile(markerFile, PI_TIMEOUT, /STATUS_/);
+      assert.ok(content.includes(`STATUS_${id}`), `Marker file should contain STATUS_${id}`);
+
+      const completionScreen = await waitForScreen(
+        surface,
+        /STATUS_TEST_DONE|completed|Sub-agent.*"Status-/i,
+        PI_TIMEOUT,
+        300,
+      );
+      assert.ok(/STATUS_TEST_DONE|completed/i.test(completionScreen));
+    });
+
     // ── Parallel subagent spawn ──
 
     it("spawns two subagents in parallel and both complete", async () => {

@@ -30,6 +30,7 @@ import {
   readScreen,
   readScreenAsync,
   closeSurface,
+  sendEscape,
   shellEscape,
   type MuxBackend,
 } from "../../pi-extension/subagents/cmux.ts";
@@ -43,6 +44,7 @@ export {
   readScreen,
   readScreenAsync,
   closeSurface,
+  sendEscape,
   shellEscape,
 };
 export type { MuxBackend };

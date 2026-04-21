@@ -25,8 +25,12 @@ import {
   readScreen,
   readScreenAsync,
   closeSurface,
+  sendEscape,
   sleep,
   uniqueId,
+  trackTempFile,
+  waitForFile,
+  waitForScreen,
   type TestEnv,
 } from "./harness.ts";
 
@@ -38,7 +42,7 @@ if (backends.length === 0) {
 }
 
 for (const backend of backends) {
-  describe(`mux-surface [${backend}]`, { timeout: 30_000 }, () => {
+  describe(`mux-surface [${backend}]`, { timeout: 60_000 }, () => {
     let prevMux: string | undefined;
     let env: TestEnv;
 
@@ -170,6 +174,35 @@ for (const backend of backends) {
       try {
         unlinkSync(filePath);
       } catch {}
+    });
+
+    it("delivers Escape as byte 27 to the target surface", async () => {
+      const surface = createTrackedSurface(env, "escape-byte-test");
+      await sleep(1000);
+
+      const marker = uniqueId();
+      const byteFile = `/tmp/pi-mux-escape-${marker}.txt`;
+      trackTempFile(env, byteFile);
+
+      const nodeProgram =
+        "const fs = require('node:fs');" +
+        "if (!process.stdin.isTTY) throw new Error('stdin is not a TTY');" +
+        "process.stdin.setRawMode(true);" +
+        "process.stdin.resume();" +
+        "process.stdout.write('ESC_READY\\n');" +
+        "process.stdin.once('data', (chunk) => {" +
+        `fs.writeFileSync(${JSON.stringify(byteFile)}, Array.from(chunk).join(','));` +
+        "process.exit(0);" +
+        "});";
+      const command = `node -e ${JSON.stringify(nodeProgram)}`;
+
+      sendLongCommand(surface, command);
+      await waitForScreen(surface, /ESC_READY/, 15_000, 50);
+
+      sendEscape(surface);
+
+      const content = await waitForFile(byteFile, 15_000, /^27$/);
+      assert.equal(content.trim(), "27");
     });
   });
 }

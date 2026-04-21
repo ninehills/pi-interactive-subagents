@@ -7,6 +7,12 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { writeFileSync } from "node:fs";
+import {
+  isMuxAvailable,
+  muxSetupHint,
+  renameCurrentTab,
+  renameWorkspace,
+} from "./cmux.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -30,6 +36,17 @@ export function shouldAutoExitOnAgentEnd(
   return true;
 }
 
+export function parseDeniedTools(rawValue: string | undefined): string[] {
+  return (rawValue ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+export function shouldRegisterSetTabTitle(deniedToolsValue: string | undefined): boolean {
+  return !parseDeniedTools(deniedToolsValue).includes("set_tab_title");
+}
+
 export default function (pi: ExtensionAPI) {
   let toolNames: string[] = [];
   let denied: string[] = [];
@@ -38,6 +55,7 @@ export default function (pi: ExtensionAPI) {
   // Read subagent identity from env vars (set by parent orchestrator)
   const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
+  const deniedToolsValue = process.env.PI_DENY_TOOLS;
 
   function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
     ctx.ui.setWidget(
@@ -96,10 +114,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     const tools = pi.getAllTools();
     toolNames = tools.map((t) => t.name).sort();
-    denied = (process.env.PI_DENY_TOOLS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    denied = parseDeniedTools(deniedToolsValue);
 
     renderWidget(ctx, null);
   });
@@ -147,6 +162,51 @@ export default function (pi: ExtensionAPI) {
       renderWidget(ctx, null);
     },
   });
+
+  if (shouldRegisterSetTabTitle(deniedToolsValue)) {
+    pi.registerTool({
+      name: "set_tab_title",
+      label: "Set Tab Title",
+      description:
+        "Update the current tab/window and workspace/session title. Use to show progress during multi-phase workflows " +
+        "(e.g. planning, executing todos, reviewing). Keep titles short and informative.",
+      promptSnippet:
+        "Update the current tab/window and workspace/session title. Use to show progress during multi-phase workflows " +
+        "(e.g. planning, executing todos, reviewing). Keep titles short and informative.",
+      parameters: Type.Object({
+        title: Type.String({
+          description: "New tab title (also applied to workspace/session when supported)",
+        }),
+      }),
+      async execute(_toolCallId, params) {
+        if (!isMuxAvailable()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Terminal multiplexer not available. ${muxSetupHint()}`,
+              },
+            ],
+            details: { error: "mux not available" },
+          };
+        }
+
+        try {
+          renameCurrentTab(params.title);
+          renameWorkspace(params.title);
+          return {
+            content: [{ type: "text", text: `Title set to: ${params.title}` }],
+            details: { title: params.title },
+          };
+        } catch (err: any) {
+          return {
+            content: [{ type: "text", text: `Failed to set title: ${err?.message}` }],
+            details: { error: err?.message },
+          };
+        }
+      },
+    });
+  }
 
   pi.registerTool({
     name: "caller_ping",

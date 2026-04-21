@@ -6,13 +6,13 @@ https://github.com/user-attachments/assets/30adb156-cfb4-4c47-84ca-dd4aa80cba9f
 
 ## How It Works
 
-Call `subagent()` and it **returns immediately**. The sub-agent runs in its own terminal pane. A live widget above the input shows all running agents with elapsed time and progress. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
+Call `subagent()` and it **returns immediately**. The sub-agent runs in its own terminal pane. A live widget above the input shows all running agents with their current state — `active`, `quiet`, `stalled`, or `starting`. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
 
 ```
-╭─ Subagents ──────────────────────── 2 running ─╮
-│ 00:23  Scout: Auth (scout)    8 msgs (5.1KB)   │
-│ 00:45  Scout: DB (scout)     12 msgs (9.3KB)   │
-╰─────────────────────────────────────────────────╯
+╭─ Subagents ────────────────────────── 2 running ─╮
+│ 00:23  Scout: Auth (scout)       active · 8 msgs │
+│ 00:45  Scout: DB (scout)                quiet 2m │
+╰──────────────────────────────────────────────────╯
 ```
 
 For parallel execution, just call `subagent` multiple times — they all run concurrently:
@@ -60,13 +60,14 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500
 
 ### Extensions
 
-**Subagents** — 4 tools + 3 commands:
+**Subagents** — 4 main-session tools + 3 commands, plus 1 subagent-only tool:
 
-| Tool              | Description                                                                     |
-| ----------------- | ------------------------------------------------------------------------------- |
-| `subagent`        | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately) |
-| `subagents_list`  | List available agent definitions                                                |
-| `subagent_resume` | Resume a previous sub-agent session (async)                                     |
+| Tool                 | Description                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `subagent`           | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately)             |
+| `subagent_interrupt` | Interrupt a running Pi-backed subagent's current turn                                       |
+| `subagents_list`     | List available agent definitions                                                            |
+| `subagent_resume`    | Resume a previous sub-agent session (async)                                                 |
 
 | Command                    | Description                          |
 | -------------------------- | ------------------------------------ |
@@ -91,24 +92,64 @@ Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global**
 ## Async Subagent Flow
 
 ```
-1. Agent calls subagent()         → returns immediately ("started")
-2. Sub-agent runs in mux pane     → widget shows live progress
+1. Agent calls subagent()          → returns immediately ("started")
+2. Sub-agent runs in mux pane      → widget shows live status
 3. User keeps chatting             → main session fully interactive
-4. Sub-agent finishes              → result steered back as interrupt
+4. Sub-agent finishes              → result steered back as a normal completion/failure
 5. Main agent processes result     → continues with new context
 ```
 
 Multiple subagents run concurrently — each steers its result back independently as it finishes. The live widget above the input tracks all running agents:
 
 ```
-╭─ Subagents ──────────────────────── 3 running ─╮
-│ 01:23  Scout: Auth (scout)      15 msgs (12KB) │
-│ 00:45  Researcher (researcher)   8 msgs (6KB)  │
-│ 00:12  Scout: DB (scout)             starting…  │
-╰─────────────────────────────────────────────────╯
+╭─ Subagents ─────────────────────────── 3 running ─╮
+│ 01:23  Scout: Auth (scout)       active · 15 msgs │
+│ 00:45  Researcher (researcher)         stalled 4m │
+│ 00:12  Scout: DB (scout)                starting… │
+╰───────────────────────────────────────────────────╯
 ```
 
 Completion messages render with a colored background and are expandable with `Ctrl+O` to show the full summary and session file path.
+
+### In-progress status updates
+
+The widget tracks each sub-agent's progress and labels it with a coarse state:
+
+- `starting` — launched, but no progress observed yet
+- `active` — recent progress observed
+- `quiet` — still running, but no recent progress
+- `stalled` — no progress for an extended period
+- `running` — fallback for backends without progress tracking (e.g. Claude)
+
+These labels are derived from session-file activity. The `defaultCadenceSeconds` setting controls the idle-time thresholds: with the default of `60`, a run becomes `quiet` after about 1 minute without progress and `stalled` after about 3 minutes. When a run enters `stalled` or recovers from it, the parent agent receives a steer message so it can react. All other status transitions stay in the widget only.
+
+#### Configuration
+
+Status defaults come from `config.json` in the extension directory. Copy `config.json.example` to get started:
+
+```bash
+cp config.json.example config.json
+```
+
+```json
+{
+  "status": {
+    "enabled": true,
+    "defaultCadenceSeconds": 60
+  }
+}
+```
+
+`config.json` is gitignored so local overrides don't get committed. You can also override per run:
+
+```typescript
+subagent({
+  name: "Scout",
+  agent: "scout",
+  statusCadenceSeconds: 30,
+  task: "Analyze the auth module",
+});
+```
 
 ---
 
@@ -126,21 +167,43 @@ subagent({ name: "Planner", agent: "planner", task: "Work through the design wit
 
 // Custom working directory
 subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer", task: "..." });
+
+// Override the status classification window for this run
+subagent({ name: "Scout", agent: "scout", statusCadenceSeconds: 30, task: "..." });
 ```
 
 ### Parameters
 
-| Parameter      | Type    | Default  | Description                                                             |
-| -------------- | ------- | -------- | ----------------------------------------------------------------------- |
-| `name`         | string  | required | Display name (shown in widget and pane title)                           |
-| `task`         | string  | required | Task prompt for the sub-agent                                           |
-| `agent`        | string  | —        | Load defaults from agent definition                                     |
-| `fork`         | boolean | `false`  | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter |
-| `model`        | string  | —        | Override agent's default model                                          |
-| `systemPrompt` | string  | —        | Append to system prompt                                                 |
-| `skills`       | string  | —        | Comma-separated skill names                                             |
-| `tools`        | string  | —        | Comma-separated tool names                                              |
-| `cwd`          | string  | —        | Working directory for the sub-agent (see [Role Folders](#role-folders)) |
+| Parameter              | Type    | Default        | Description                                                                                       |
+| ---------------------- | ------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| `name`                 | string  | required       | Display name (shown in widget and pane title)                                                     |
+| `task`                 | string  | required       | Task prompt for the sub-agent                                                                     |
+| `agent`                | string  | —              | Load defaults from agent definition                                                               |
+| `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
+| `model`                | string  | —              | Override agent's default model                                                                    |
+| `systemPrompt`         | string  | —              | Append to system prompt                                                                           |
+| `skills`               | string  | —              | Comma-separated skill names                                                                       |
+| `tools`                | string  | —              | Comma-separated tool names                                                                        |
+| `cwd`                  | string  | —              | Working directory for the sub-agent (see [Role Folders](#role-folders))                           |
+| `statusCadenceSeconds` | number  | config default | Idle-time window for status classification (has a minimum floor)                                  |
+
+---
+
+## Interrupting a running subagent
+
+Use `subagent_interrupt` to cancel the active turn of a running Pi-backed subagent:
+
+```typescript
+subagent_interrupt({ id: "abcd1234" });
+// or
+subagent_interrupt({ name: "Scout" });
+```
+
+This sends Escape to the child pane, cancelling the in-progress model turn. The subagent session stays alive — the pane, session file, and background polling all remain intact. After the interrupt, the widget shows the child as `quiet`. If the child makes new progress later, it returns to `active`; completion, failure, and `caller_ping` still flow through normally.
+
+This is a turn-level interrupt, not a method for forcibly terminating a subagent session.
+
+> **Note:** Only Pi-backed subagents are supported. Claude-backed runs will return an error.
 
 ---
 
@@ -299,7 +362,7 @@ By default, every sub-agent can spawn further sub-agents. Control this with fron
 
 ### `spawning: false`
 
-Denies all spawning tools (`subagent`, `subagents_list`, `subagent_resume`):
+Denies all subagent lifecycle tools (`subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume`):
 
 ```yaml
 ---
@@ -401,6 +464,14 @@ Optional backend override:
 ```bash
 export PI_SUBAGENT_MUX=cmux   # or tmux, zellij, wezterm
 ```
+
+---
+
+## Acknowledgements
+
+The sub-agent status supervision and turn-only interruption features were inspired by [RepoPrompt](https://repoprompt.com/)'s sub-agent snapshot polling and run cancellation features.
+
+---
 
 ## License
 

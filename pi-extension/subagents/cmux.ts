@@ -492,14 +492,42 @@ export function sendCommand(surface: string, command: string): void {
   }
 
   if (backend === "wezterm") {
-    execFileSync("wezterm", ["cli", "send-text", "--pane-id", surface, "--no-paste", command + "\n"], {
-      encoding: "utf8",
-    });
+    execFileSync(
+      "wezterm",
+      ["cli", "send-text", "--pane-id", surface, "--no-paste", command + "\n"],
+      { encoding: "utf8" },
+    );
     return;
   }
 
   zellijActionSync(["write-chars", command], surface);
   zellijActionSync(["write", "13"], surface);
+}
+
+/**
+ * Send one Escape keypress to an active pane.
+ */
+export function sendEscape(surface: string): void {
+  const backend = requireMuxBackend();
+
+  if (backend === "cmux") {
+    execFileSync("cmux", ["send", "--surface", surface, "\u001b"], { encoding: "utf8" });
+    return;
+  }
+
+  if (backend === "tmux") {
+    execFileSync("tmux", ["send-keys", "-t", surface, "Escape"], { encoding: "utf8" });
+    return;
+  }
+
+  if (backend === "wezterm") {
+    execFileSync("wezterm", ["cli", "send-text", "--pane-id", surface, "--no-paste", "\u001b"], {
+      encoding: "utf8",
+    });
+    return;
+  }
+
+  zellijActionSync(["write", "27"], surface);
 }
 
 /**
