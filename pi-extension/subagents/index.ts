@@ -351,6 +351,136 @@ function resolveEffectiveInteractive(
   return !(agentDefs?.autoExit ?? false);
 }
 
+type ModelRegistryModel = ReturnType<ExtensionContext["modelRegistry"]["getAll"]>[number];
+type ModelRegistryLike = Pick<ExtensionContext["modelRegistry"], "getAll"> & {
+  getAvailable?: () => ModelRegistryModel[];
+};
+type CurrentModelLike = ExtensionContext["model"];
+interface ModelFallbackWarning {
+  requested: string;
+  used: string;
+  reason: "unavailable" | "registry-unavailable";
+}
+
+function currentModelReference(model: CurrentModelLike): string | undefined {
+  return model ? `${model.provider}/${model.id}` : undefined;
+}
+
+function availableModels(modelRegistry: ModelRegistryLike): ModelRegistryModel[] {
+  return modelRegistry.getAvailable?.() ?? modelRegistry.getAll();
+}
+
+function splitThinkingSuffix(modelReference: string): { base: string; suffix: string } {
+  const lastColon = modelReference.lastIndexOf(":");
+  if (lastColon === -1) return { base: modelReference, suffix: "" };
+  return {
+    base: modelReference.slice(0, lastColon),
+    suffix: modelReference.slice(lastColon),
+  };
+}
+
+function formatModelReference(model: ModelRegistryModel, suffix = ""): string {
+  return `${model.provider}/${model.id}${suffix}`;
+}
+
+function resolveAvailableModelReference(
+  modelReference: string,
+  modelRegistry: ModelRegistryLike,
+): string | undefined {
+  const models = availableModels(modelRegistry);
+  const requested = modelReference.trim();
+  if (!requested) return undefined;
+  const { base, suffix } = splitThinkingSuffix(requested);
+  const query = base.trim().toLowerCase();
+  if (!query) return undefined;
+
+  const exact = models.find(
+    (model) =>
+      `${model.provider}/${model.id}`.toLowerCase() === query ||
+      model.id.toLowerCase() === query,
+  );
+  if (exact) return formatModelReference(exact, suffix);
+
+  const slashIndex = base.indexOf("/");
+  if (slashIndex !== -1) {
+    const provider = base.slice(0, slashIndex).trim().toLowerCase();
+    const modelId = base.slice(slashIndex + 1).trim().toLowerCase();
+    const providerExact = models.find(
+      (model) => model.provider.toLowerCase() === provider && model.id.toLowerCase() === modelId,
+    );
+    if (providerExact) return formatModelReference(providerExact, suffix);
+  }
+
+  return undefined;
+}
+
+function resolveEffectiveModel(
+  params: Static<typeof SubagentParams>,
+  agentDefs: AgentDefaults | null,
+  ctx: { modelRegistry?: ModelRegistryLike; model?: CurrentModelLike },
+): string | undefined {
+  const requestedModel = params.model ?? agentDefs?.model;
+  if (!requestedModel) return undefined;
+
+  if (ctx.modelRegistry) {
+    return (
+      resolveAvailableModelReference(requestedModel, ctx.modelRegistry) ??
+      currentModelReference(ctx.model) ??
+      requestedModel
+    );
+  }
+
+  if (params.model) {
+    return requestedModel;
+  }
+
+  return currentModelReference(ctx.model) ?? requestedModel;
+}
+
+function formatModelFallbackWarning(warning: ModelFallbackWarning): string {
+  const reason = warning.reason === "registry-unavailable"
+    ? "the model registry was unavailable"
+    : "the requested model is not available in this environment";
+  return `Warning: subagent requested model "${warning.requested}", but ${reason}; using "${warning.used}" instead.`;
+}
+
+function notifyModelFallbackWarning(
+  pi: ExtensionAPI,
+  running: Pick<RunningSubagent, "name" | "agent" | "modelWarning">,
+) {
+  if (!running.modelWarning) return;
+  pi.sendMessage(
+    {
+      customType: "subagent_model_warning",
+      content: formatModelFallbackWarning(running.modelWarning),
+      display: true,
+      details: {
+        name: running.name,
+        agent: running.agent,
+        modelWarning: running.modelWarning,
+      },
+    },
+    { triggerTurn: true, deliverAs: "steer" },
+  );
+}
+
+function resolveModelFallbackWarning(
+  params: Static<typeof SubagentParams>,
+  agentDefs: AgentDefaults | null,
+  ctx: { modelRegistry?: ModelRegistryLike; model?: CurrentModelLike },
+  effectiveModel: string | undefined,
+): ModelFallbackWarning | undefined {
+  const requestedModel = params.model ?? agentDefs?.model;
+  if (!requestedModel || !effectiveModel || requestedModel === effectiveModel) return undefined;
+  if (ctx.modelRegistry && resolveAvailableModelReference(requestedModel, ctx.modelRegistry)) return undefined;
+  if (!ctx.modelRegistry && params.model) return undefined;
+  return {
+    requested: requestedModel,
+    used: effectiveModel,
+    reason: ctx.modelRegistry ? "unavailable" : "registry-unavailable",
+  };
+}
+
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
   const configDir = getAgentConfigDir();
   const paths = [
@@ -472,6 +602,7 @@ interface RunningSubagent {
   sessionFile: string;
   launchScriptFile?: string;
   activityFile?: string;
+  modelWarning?: ModelFallbackWarning;
   activity?: SubagentActivityState;
   activityRead?: {
     ok: boolean;
@@ -846,6 +977,11 @@ export const __test__ = {
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
+  resolveEffectiveModel,
+  resolveAvailableModelReference,
+  formatModelFallbackWarning,
+  notifyModelFallbackWarning,
+  resolveModelFallbackWarning,
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
@@ -874,14 +1010,24 @@ function startWidgetRefresh() {
  */
 async function launchSubagent(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
+  ctx: {
+    sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
+    cwd: string;
+    modelRegistry?: ModelRegistryLike;
+    model?: CurrentModelLike;
+  },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  const effectiveModel = agentDefs?.cli === "claude"
+    ? (params.model ?? agentDefs?.model)
+    : resolveEffectiveModel(params, agentDefs, ctx);
+  const modelWarning = agentDefs?.cli === "claude"
+    ? undefined
+    : resolveModelFallbackWarning(params, agentDefs, ctx, effectiveModel);
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1154,6 +1300,7 @@ async function launchSubagent(
     sessionFile: subagentSessionFile,
     launchScriptFile,
     activityFile,
+    modelWarning,
     interactive: effectiveInteractive,
     statusState: createStatusState({
       source: "pi",
@@ -1390,6 +1537,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Launch the subagent (creates pane, sends command)
         const running = await launchSubagent(params, ctx);
+        notifyModelFallbackWarning(pi, running);
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
