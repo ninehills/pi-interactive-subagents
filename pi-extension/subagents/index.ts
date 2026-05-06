@@ -3,6 +3,7 @@ import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   readdirSync,
   readFileSync,
@@ -27,6 +28,7 @@ import {
   renameWorkspace,
   readScreen,
 } from "./cmux.ts";
+
 import {
   findLastAssistantMessage,
   getNewEntries,
@@ -51,6 +53,9 @@ import {
   type ActivityReadResult,
   type SubagentActivityState,
 } from "./activity.ts";
+
+/** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
+const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
@@ -196,7 +201,7 @@ function getAgentConfigDir(): string {
 }
 
 function getBundledAgentsDir(): string {
-  return join(dirname(new URL(import.meta.url).pathname), "../../agents");
+  return join(SUBAGENTS_DIR, "../../agents");
 }
 
 function getFrontmatterValue(frontmatter: string, key: string): string | undefined {
@@ -767,6 +772,32 @@ function updateWidget() {
  * first positional message so that /skill: args land in messages[1..] and arrive
  * as standalone prompts in the child session.
  */
+const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
+
+/**
+ * Build the child --tools allowlist.
+ *
+ * Pi 0.70+ applies --tools to built-in, extension, and custom tools. If a
+ * subagent definition restricts tools to e.g. "read,bash,write", the child
+ * control tools from subagent-done.ts would otherwise be hidden, leaving a
+ * manually resumed or user-touched subagent unable to call subagent_done.
+ */
+function buildSubagentToolAllowlist(effectiveTools?: string): string | null {
+  const requested = (effectiveTools ?? "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+
+  if (requested.length === 0) return null;
+
+  const allow = new Set(requested);
+  for (const tool of SUBAGENT_CONTROL_TOOLS) {
+    allow.add(tool);
+  }
+
+  return [...allow].join(",");
+}
+
 function buildPiPromptArgs(params: {
   effectiveSkills?: string;
   taskDelivery: "direct" | "artifact";
@@ -968,6 +999,11 @@ function startStatusRefresh(pi: ExtensionAPI) {
   (globalThis as any)[STATUS_INTERVAL_KEY] = statusInterval;
 }
 
+function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): { autoExit: boolean; interactive: boolean } {
+  const autoExit = params.autoExit ?? true;
+  return { autoExit, interactive: !autoExit };
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -982,6 +1018,7 @@ export const __test__ = {
   formatModelFallbackWarning,
   notifyModelFallbackWarning,
   resolveModelFallbackWarning,
+  buildSubagentToolAllowlist,
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
@@ -990,6 +1027,7 @@ export const __test__ = {
   requestSubagentInterrupt,
   handleSubagentInterrupt,
   resolveResultPresentation,
+  resolveResumeLaunchBehavior,
   runningSubagents,
 };
 
@@ -1097,7 +1135,7 @@ async function launchSubagent(
   // ── Claude Code CLI path ──
   if (agentDefs?.cli === "claude") {
     const sentinelFile = `/tmp/pi-claude-${id}-done`;
-    const pluginDir = join(dirname(new URL(import.meta.url).pathname), "plugin");
+    const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
     const cmdParts: string[] = [];
     cmdParts.push(`PI_CLAUDE_SENTINEL=${shellEscape(sentinelFile)}`);
@@ -1173,7 +1211,7 @@ async function launchSubagent(
   const parts: string[] = ["pi"];
   parts.push("--session", shellEscape(subagentSessionFile));
 
-  const subagentDonePath = join(dirname(new URL(import.meta.url).pathname), "subagent-done.ts");
+  const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
   parts.push("-e", shellEscape(subagentDonePath));
 
   if (effectiveModel) {
@@ -1199,15 +1237,9 @@ async function launchSubagent(
     parts.push(flag, shellEscape(syspromptPath));
   }
 
-  if (effectiveTools) {
-    const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-    const builtins = effectiveTools
-      .split(",")
-      .map((t) => t.trim())
-      .filter((t) => BUILTIN_TOOLS.has(t));
-    if (builtins.length > 0) {
-      parts.push("--tools", shellEscape(builtins.join(",")));
-    }
+  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools);
+  if (toolAllowlist) {
+    parts.push("--tools", shellEscape(toolAllowlist));
   }
 
   // Build env prefix: denied tools + subagent identity + config dir propagation
@@ -1491,16 +1523,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       label: "Subagent",
       description:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
-        "IMPORTANT: This tool returns IMMEDIATELY — the sub-agent runs asynchronously in the background. " +
-        "You will NOT have results when this tool returns. Results are delivered later via a steer message. " +
-        "Do NOT fabricate, assume, or summarize results after calling this tool. " +
-        "Either wait for the steer message or move on to other work.",
+        "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
+        "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+        "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
+        "DO NOT fabricate, assume, or summarize results after calling this tool. " +
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
-        "IMPORTANT: This tool returns IMMEDIATELY — the sub-agent runs asynchronously in the background. " +
-        "You will NOT have results when this tool returns. Results are delivered later via a steer message. " +
-        "Do NOT fabricate, assume, or summarize results after calling this tool. " +
-        "Either wait for the steer message or move on to other work.",
+        "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
+        "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+        "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
+        "DO NOT fabricate, assume, or summarize results after calling this tool. " +
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1801,13 +1835,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       label: "Resume Subagent",
       description:
         "Resume a previous sub-agent session in a new multiplexer pane. " +
-        "IMPORTANT: Returns IMMEDIATELY — the resumed session runs asynchronously in the background. " +
-        "Results are delivered later via a steer message. Do NOT fabricate or assume results. " +
+        "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
+        "When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+        "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
+        "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
         "Use when a sub-agent was cancelled or needs follow-up work.",
       promptSnippet:
         "Resume a previous sub-agent session in a new multiplexer pane. " +
-        "IMPORTANT: Returns IMMEDIATELY — the resumed session runs asynchronously in the background. " +
-        "Results are delivered later via a steer message. Do NOT fabricate or assume results. " +
+        "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
+        "When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+        "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
+        "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
         "Use when a sub-agent was cancelled or needs follow-up work.",
       parameters: Type.Object({
         sessionPath: Type.String({ description: "Path to the session .jsonl file to resume" }),
@@ -1817,6 +1855,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         message: Type.Optional(
           Type.String({
             description: "Optional message to send after resuming (e.g. follow-up instructions)",
+          }),
+        ),
+        autoExit: Type.Optional(
+          Type.Boolean({
+            description:
+              "Whether the resumed session should automatically exit after completing its response. Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
           }),
         ),
       }),
@@ -1852,6 +1896,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const name = params.name ?? "Resume";
+        const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
         const startTime = Date.now();
         const id = Math.random().toString(16).slice(2, 10);
 
@@ -1878,10 +1923,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const parts = ["pi", "--session", shellEscape(params.sessionPath)];
 
         // Load subagent-done extension so the agent can self-terminate if needed
-        const subagentDonePath = join(
-          dirname(new URL(import.meta.url).pathname),
-          "subagent-done.ts",
-        );
+        const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
         parts.push("-e", shellEscape(subagentDonePath));
 
         const sessionId = ctx.sessionManager.getSessionId();
@@ -1916,6 +1958,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
         resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
+        if (autoExit) {
+          resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
+        }
         const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
 
         const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
@@ -1950,7 +1995,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           sessionFile: params.sessionPath,
           launchScriptFile,
           activityFile,
-          interactive: true,
+          interactive,
           statusState: createStatusState({
             source: "pi",
             startTimeMs: startTime,
@@ -2235,7 +2280,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
 
       // Load the plan skill from the subagents extension directory
-      const planSkillPath = join(dirname(new URL(import.meta.url).pathname), "plan-skill.md");
+      const planSkillPath = join(SUBAGENTS_DIR, "plan-skill.md");
       let content = readFileSync(planSkillPath, "utf8");
       content = content.replace(/^---\n[\s\S]*?\n---\n*/, "");
       pi.sendUserMessage(
