@@ -755,6 +755,64 @@ function createCmuxSplitSurface(
 }
 
 /**
+ * Resolve the current herdr pane info by parsing `herdr pane list` JSON.
+ *
+ * herdr sets HERDR_ENV=1 on every pane process but only exposes the public
+ * pane ID (e.g. "1-1") via the pane list API — HERDR_ACTIVE_PANE_ID is only
+ * set during navigate-mode spawns and is not available to regular pane
+ * processes.
+ *
+ * Result is cached after the first successful lookup.
+ */
+interface HerDrCurrentPaneInfo {
+  paneId: string;
+  tabId: string | null;
+  workspaceId: string | null;
+}
+
+let herdrCurrentPaneInfo: HerDrCurrentPaneInfo | null = null;
+
+function getHerDrCurrentPaneInfo(): HerDrCurrentPaneInfo {
+  if (herdrCurrentPaneInfo) return herdrCurrentPaneInfo;
+
+  const output = execFileSync("herdr", ["pane", "list"], { encoding: "utf8" }).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error(`Failed to parse herdr pane list output: ${output}`);
+  }
+
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "result" in parsed &&
+    parsed.result &&
+    typeof parsed.result === "object" &&
+    "panes" in parsed.result &&
+    Array.isArray(parsed.result.panes)
+  ) {
+    const focused = parsed.result.panes.find(
+      (p: Record<string, unknown>) => p.focused === true,
+    );
+    if (focused && typeof focused.pane_id === "string") {
+      herdrCurrentPaneInfo = {
+        paneId: focused.pane_id,
+        tabId: typeof focused.tab_id === "string" ? focused.tab_id : null,
+        workspaceId: typeof focused.workspace_id === "string" ? focused.workspace_id : null,
+      };
+      return herdrCurrentPaneInfo;
+    }
+  }
+
+  throw new Error(`Could not find focused pane in herdr pane list: ${output}`);
+}
+
+function getHerDrCurrentPane(): string {
+  return getHerDrCurrentPaneInfo().paneId;
+}
+
+/**
  * Create a new herdr split pane.
  *
  * Calls `herdr pane split` and parses the JSON response for the new pane ID.
@@ -832,10 +890,7 @@ export function createSurface(name: string): string {
   }
 
   if (backend === "herdr") {
-    const currentPane = process.env.HERDR_ACTIVE_PANE_ID;
-    if (!currentPane) {
-      throw new Error("HERDR_ACTIVE_PANE_ID not set — is pi running inside herdr?");
-    }
+    const currentPane = getHerDrCurrentPane();
     return createHerDrSplit(name, "right", currentPane);
   }
 
@@ -934,10 +989,7 @@ export function createSurfaceSplit(
   }
 
   if (backend === "herdr") {
-    const sourcePane = fromSurface ?? process.env.HERDR_ACTIVE_PANE_ID;
-    if (!sourcePane) {
-      throw new Error("HERDR_ACTIVE_PANE_ID not set — is pi running inside herdr?");
-    }
+    const sourcePane = fromSurface ?? getHerDrCurrentPane();
     return createHerDrSplit(name, direction, sourcePane);
   }
 
@@ -1013,13 +1065,13 @@ export function renameCurrentTab(title: string): void {
   }
 
   if (backend === "herdr") {
-    const tabId = process.env.HERDR_ACTIVE_TAB_ID;
-    if (tabId) {
-      try {
-        execFileSync("herdr", ["tab", "rename", tabId, title], { encoding: "utf8" });
-      } catch {
-        // Optional — tab rename is cosmetic.
+    try {
+      const info = getHerDrCurrentPaneInfo();
+      if (info.tabId) {
+        execFileSync("herdr", ["tab", "rename", info.tabId, title], { encoding: "utf8" });
       }
+    } catch {
+      // Optional — tab rename is cosmetic.
     }
     return;
   }
@@ -1080,13 +1132,13 @@ export function renameWorkspace(title: string): void {
   }
 
   if (backend === "herdr") {
-    const workspaceId = process.env.HERDR_ACTIVE_WORKSPACE_ID;
-    if (workspaceId) {
-      try {
-        execFileSync("herdr", ["workspace", "rename", workspaceId, title], { encoding: "utf8" });
-      } catch {
-        // Optional — workspace rename is cosmetic.
+    try {
+      const info = getHerDrCurrentPaneInfo();
+      if (info.workspaceId) {
+        execFileSync("herdr", ["workspace", "rename", info.workspaceId, title], { encoding: "utf8" });
       }
+    } catch {
+      // Optional — workspace rename is cosmetic.
     }
     return;
   }
