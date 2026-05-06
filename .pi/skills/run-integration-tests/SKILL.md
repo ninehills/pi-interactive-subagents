@@ -14,13 +14,14 @@ Verify the environment is ready:
 ```bash
 echo "CMUX_SOCKET_PATH=$CMUX_SOCKET_PATH"
 echo "TMUX=$TMUX"
+echo "HERDR_ENV=$HERDR_ENV"
 node --version
 ```
 
-- At least one of `CMUX_SOCKET_PATH` or `TMUX` must be set
+- At least one of `CMUX_SOCKET_PATH`, `TMUX`, or `HERDR_ENV=1` must be set
 - Node 22+ required
 
-If neither mux is available, stop and tell the user to run inside cmux or tmux.
+If no mux is available, stop and tell the user to run inside cmux, tmux, or herdr.
 
 ## Step 2: Run Unit Tests
 
