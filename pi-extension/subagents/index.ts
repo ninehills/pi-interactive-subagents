@@ -2289,6 +2289,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
   });
 
+  // ── subagents_list cmd message renderer ──
+  pi.registerMessageRenderer("subagents_list", (message, _options, theme) => {
+    const lines = typeof message.content === "string" ? message.content.split("\n") : [];
+    if (lines.length === 0) return undefined;
+    return {
+      render(_width: number): string[] {
+        return lines.map((line) => theme.fg("dim", line));
+      },
+    };
+  });
+
   // /subagents_list command — list all available subagent definitions
   pi.registerCommand("subagents_list", {
     description: "List all available subagent definitions",
@@ -2305,6 +2316,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return `• ${a.name}${badge}${model}${desc}`;
       });
       pi.sendMessage({
+        customType: "subagents_list",
         content: lines.join("\n"),
         display: true,
         details: { agents: list },
