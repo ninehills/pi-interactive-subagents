@@ -2294,8 +2294,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     const lines = typeof message.content === "string" ? message.content.split("\n") : [];
     if (lines.length === 0) return undefined;
     return {
-      render(_width: number): string[] {
-        return lines.map((line) => theme.fg("dim", line));
+      render(width: number): string[] {
+        return lines.map((line) => theme.fg("dim", truncateToWidth(line, width)));
       },
     };
   });
