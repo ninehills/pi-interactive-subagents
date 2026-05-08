@@ -2288,5 +2288,28 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       );
     },
   });
+
+  // /subagents_list command — list all available subagent definitions
+  pi.registerCommand("subagents_list", {
+    description: "List all available subagent definitions",
+    handler: async (_args, ctx) => {
+      const list = discoverAgentDefinitions().filter((a) => !a.disableModelInvocation);
+      if (list.length === 0) {
+        ctx.ui.notify("No subagent definitions found.", "info");
+        return;
+      }
+      const lines = list.map((a) => {
+        const badge = a.source === "project" ? " (project)" : "";
+        const desc = a.description ? ` — ${a.description}` : "";
+        const model = a.model ? ` [${a.model}]` : "";
+        return `• ${a.name}${badge}${model}${desc}`;
+      });
+      pi.sendMessage({
+        content: lines.join("\n"),
+        display: true,
+        details: { agents: list },
+      });
+    },
+  });
 }
 // test
